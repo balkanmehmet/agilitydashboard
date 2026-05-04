@@ -19,21 +19,21 @@ log = logging.getLogger("standup_board")
 def _log_state(label: str, state: dict):
     log.info("%s | ── STATE SNAPSHOT ──────────────────────", label)
     for k, v in state.items():
-        if k == "issues":
-            log.info("%s | issues (%d):", label, len(v or []))
-            for i, issue in enumerate(v or []):
+        if k == "jiras":
+            log.info("%s | jiras (%d):", label, len(v or []))
+            for i, jira in enumerate(v or []):
                 log.info(
                     "%s |   [%d] key=%-8s status=%-12s assignee=%-20s summary=%r",
                     label, i,
-                    issue.get("key", "?"),
-                    issue.get("status", "?"),
-                    issue.get("assignee", "?"),
-                    str(issue.get("summary", ""))[:60],
+                    jira.get("key", "?"),
+                    jira.get("status", "?"),
+                    jira.get("assignee", "?"),
+                    str(jira.get("summary", ""))[:60],
                 )
-        elif k == "current_issue":
+        elif k == "current_jira":
             ci = v or {}
             log.info(
-                "%s | current_issue: key=%s status=%s summary=%r",
+                "%s | current_jira: key=%s status=%s summary=%r",
                 label, ci.get("key", "—"), ci.get("status", "—"),
                 str(ci.get("summary", ""))[:60],
             )
@@ -45,7 +45,7 @@ def _log_state(label: str, state: dict):
 # ── Config ────────────────────────────────────────────────────────────────────
 FUNCTION_APP_BASE_URL = os.getenv("FUNCTION_APP_BASE_URL", "").rstrip("/")
 FUNCTION_APP_CODE = os.getenv("FUNCTION_APP_CODE", "")
-REFRESH_SECONDS = int(os.getenv("REFRESH_SECONDS", "5"))
+REFRESH_SECONDS = int(os.getenv("REFRESH_SECONDS", "2"))
 
 PREFERRED_STATUS_ORDER = ["New", "In Progress", "Blocked", "In Review", "Done"]
 
@@ -83,40 +83,22 @@ def get_state(instance_id: str):
     return data
 
 
-@st.cache_data(ttl=REFRESH_SECONDS, show_spinner=False)
-def get_state_cached(instance_id: str, refresh_seconds: int):
-    _ = refresh_seconds
-    return get_state(instance_id)
 
-
-def get_state_logged(instance_id: str, refresh_seconds: int) -> dict:
-    data = get_state_cached(instance_id, refresh_seconds)
+def get_state_stored(instance_id: str) -> dict:
+    data = get_state(instance_id)
     _log_state("CACHE_RETURN", data)
     return data
 
 
 # ── State management ──────────────────────────────────────────────────────────
-def is_presentation_active(standup_status: str, spoken_text: str, current_issue_key) -> bool:
+def is_presentation_active(standup_status: str, spoken_text: str, current_jira_key) -> bool:
     status_value = (standup_status or "").strip().lower()
-    active_tokens = ("speak", "present", "narrat", "wait", "listen", "advance_pending", "issue_discussion")
+    active_tokens = ("speak", "present", "narrat", "wait", "listen", "advance_pending", "jira_discussion")
     has_active = any(t in status_value for t in active_tokens)
-    return bool(current_issue_key) and (has_active or bool((spoken_text or "").strip()))
+    return bool(current_jira_key) and (has_active or bool((spoken_text or "").strip()))
 
 
 def choose_display_state(latest_state: dict) -> tuple[dict, bool]:
-    latest_ci = latest_state.get("current_issue") or {}
-    latest_key = latest_ci.get("key")
-    latest_status = latest_state.get("status", "unknown")
-    latest_text = latest_state.get("spoken_text", "")
-
-    snapshot = st.session_state.get("display_state_snapshot")
-    if snapshot:
-        snap_key = (snapshot.get("current_issue") or {}).get("key")
-        if snap_key and snap_key == latest_key and is_presentation_active(latest_status, latest_text, latest_key):
-            log.info("CHOOSE_DISPLAY | returning LOCKED snapshot for key=%s", snap_key)
-            _log_state("DISPLAY/snapshot", snapshot)
-            return snapshot, True
-
     log.info("CHOOSE_DISPLAY | returning LATEST state")
     _log_state("DISPLAY/latest", latest_state)
     st.session_state["display_state_snapshot"] = latest_state
@@ -131,10 +113,10 @@ def normalize_status(status: str) -> str:
     return mapping.get(s, status or "Unknown")
 
 
-def get_status_columns(issues: list[dict]) -> list[str]:
+def get_status_columns(jiras: list[dict]) -> list[str]:
     extra, seen = [], set(PREFERRED_STATUS_ORDER)
-    for issue in issues:
-        sn = normalize_status(issue.get("status", ""))
+    for jira in jiras:
+        sn = normalize_status(jira.get("status", ""))
         if sn not in seen:
             extra.append(sn)
             seen.add(sn)
@@ -160,26 +142,26 @@ def esc(value) -> str:
 
 
 # ── Board renderer — pure HTML grid so all pillars are equal height ───────────
-def render_board(issues: list, current_issue_key):
+def render_board(jiras: list, current_jira_key):
     grouped = defaultdict(list)
-    for issue in issues:
-        assignee = issue.get("assignee") or "Unassigned"
-        grouped[assignee].append(issue)
+    for jira in jiras:
+        assignee = jira.get("assignee") or "Unassigned"
+        grouped[assignee].append(jira)
 
     if not grouped:
-        st.info("No issues available.")
+        st.info("No jiras available.")
         return
 
-    status_columns = get_status_columns(issues)
+    status_columns = get_status_columns(jiras)
     col_pct = 100 / len(status_columns)
     assignees = sorted(grouped.keys(), key=lambda x: x.lower())
     tabs = st.tabs([f"{clean(name)} ({len(grouped[name])})" for name in assignees])
 
     for tab, assignee in zip(tabs, assignees):
-        assignee_issues = grouped[assignee]
+        assignee_jiras = grouped[assignee]
         buckets: dict[str, list] = {s: [] for s in status_columns}
-        for issue in assignee_issues:
-            buckets[normalize_status(issue.get("status", ""))].append(issue)
+        for jira in assignee_jiras:
+            buckets[normalize_status(jira.get("status", ""))].append(jira)
 
         with tab:
             # Build the entire board as one HTML block so CSS grid enforces equal heights
@@ -187,11 +169,11 @@ def render_board(issues: list, current_issue_key):
             for status_name in status_columns:
                 bucket = buckets[status_name]
                 cards_html = ""
-                for issue in bucket:
-                    key = esc(clean(issue.get("key", "-")))
-                    summary = esc(clean(issue.get("summary", ""))) or "-"
-                    priority = esc(clean(issue.get("priority", "-"))) or "-"
-                    is_cur = issue.get("key") == current_issue_key
+                for jira in bucket:
+                    key = esc(clean(jira.get("key", "-")))
+                    summary = esc(clean(jira.get("summary", ""))) or "-"
+                    priority = esc(clean(jira.get("priority", "-"))) or "-"
+                    is_cur = jira.get("key") == current_jira_key
                     arrow = "▶ " if is_cur else ""
                     cur_cls = " card-current" if is_cur else ""
                     cards_html += f"""
@@ -213,20 +195,20 @@ def render_board(issues: list, current_issue_key):
             st.html(f"<div class='board-grid'>{cols_html}</div>")
 
 
-# ── Current issue panel ───────────────────────────────────────────────────────
-def render_bottom_current_issue(current_issue: dict, spoken_text: str, standup_status: str):
-    st.divider()
+# ── Current jira panel ───────────────────────────────────────────────────────
+def render_bottom_current_jira(current_jira: dict, spoken_text: str, standup_status: str):
+    st.html("<hr style='margin:4px 0 6px 0;border:none;border-top:1px solid #e0e0e0;'>") 
 
-    if not current_issue:
-        st.html("<div class='current-empty'>No current issue selected.</div>")
+    if not current_jira:
+        st.html("<div class='current-empty'>No current jira selected.</div>")
         return
 
-    key     = esc(clean(current_issue.get("key", "-")))
-    summary = esc(clean(current_issue.get("summary", ""))) or "-"
-    status  = clean(current_issue.get("status", "-")) or "-"
-    assignee = esc(clean(current_issue.get("assignee", "-"))) or "-"
-    priority = esc(clean(current_issue.get("priority", "-"))) or "-"
-    description = clean_multi(current_issue.get("description") or "")
+    key     = esc(clean(current_jira.get("key", "-")))
+    summary = esc(clean(current_jira.get("summary", ""))) or "-"
+    status  = clean(current_jira.get("status", "-")) or "-"
+    assignee = esc(clean(current_jira.get("assignee", "-"))) or "-"
+    priority = esc(clean(current_jira.get("priority", "-"))) or "-"
+    description = clean_multi(current_jira.get("description") or "")
     narration   = clean_multi(spoken_text or "")
 
     status_badge = _status_badge(status)
@@ -235,11 +217,7 @@ def render_bottom_current_issue(current_issue: dict, spoken_text: str, standup_s
         f"<div class='cur-body'>{esc(description).replace(chr(10), '<br>')}</div>"
         if description else ""
     )
-    narr_block = (
-        f"<div class='cur-label'>BOT NARRATION</div>"
-        f"<div class='cur-body'>{esc(narration).replace(chr(10), '<br>')}</div>"
-        if narration else ""
-    )
+
 
     log.info("RENDER | key=%s status=%s", key, status)
 
@@ -254,7 +232,6 @@ def render_bottom_current_issue(current_issue: dict, spoken_text: str, standup_s
             <span class='meta-chip'>Priority: <strong>{priority}</strong></span>
         </div>
         {desc_block}
-        {narr_block}
     </div>
     """)
 
@@ -267,8 +244,20 @@ st.markdown("""
 /* ── Layout ──────────────────────────────────────────────── */
 .block-container { padding-top:0.6rem; padding-bottom:0.1rem; max-width:99%; }
 h1,h2,h3 { margin-top:0.02rem; margin-bottom:0.02rem; }
-hr { margin-top:0.2rem; margin-bottom:0.2rem; }
-p { margin-bottom:0.04rem; }
+hr { margin-top:0.1rem; margin-bottom:0.1rem; }
+p { margin-bottom:0.02rem; }
+
+/* Collapse Streamlit's default vertical gaps around html/iframe elements */
+div[data-testid="stHtml"] { margin-top:0 !important; margin-bottom:0 !important; line-height:0; }
+div[data-testid="stHtml"] > iframe { display:block; margin:0; padding:0; }
+
+/* Collapse vertical block gaps */
+div[data-testid="stVerticalBlock"] > div { gap:0.15rem !important; }
+section[data-testid="stSidebar"] ~ div div[data-testid="stVerticalBlock"] > div { gap:0.1rem; }
+
+/* Tabs container bottom margin */
+div[data-testid="stTabs"] { margin-bottom:0 !important; }
+div[data-testid="stTabContent"] { padding-top:0.25rem !important; padding-bottom:0 !important; }
 
 /* ── Header ──────────────────────────────────────────────── */
 .board-title {
@@ -304,7 +293,7 @@ div[data-testid="stTabs"] button { font-size:0.7rem; padding:0.06rem 0.4rem; }
     padding:8px;
     display:flex;
     flex-direction:column;
-    min-height:300px;
+    min-height:200px;
 }
 .pillar-header {
     font-size:0.72rem; font-weight:700; color:#172b4d;
@@ -326,10 +315,10 @@ div[data-testid="stTabs"] button { font-size:0.7rem; padding:0.06rem 0.4rem; }
 .card-meta    { font-size:0.6rem;  color:#5e6c84; margin-top:2px; }
 .empty-pillar { font-size:0.65rem; color:#9db8ca; padding-top:4px; }
 
-/* ── Current issue panel ─────────────────────────────────── */
+/* ── Current jira panel ─────────────────────────────────── */
 .current-panel {
     background:#fff; border:2px solid #0052cc;
-    border-radius:12px; padding:1rem 1.3rem; margin-top:0.2rem;
+    border-radius:12px; padding:1rem 1.3rem; margin-top:0;
 }
 .cur-top {
     display:flex; justify-content:space-between;
@@ -377,29 +366,29 @@ if not instance_id:
     st.stop()
 
 try:
-    latest_state = get_state_logged(instance_id, REFRESH_SECONDS)
+    latest_state = get_state_stored(instance_id)
     state, snapshot_locked = choose_display_state(latest_state)
 except Exception as e:
     st.error(f"Failed to load standup state: {e}")
     st.stop()
 
-issues          = state.get("issues", []) or []
-current_issue   = state.get("current_issue") or {}
-current_issue_key = current_issue.get("key")
+jiras          = state.get("jiras", []) or []
+current_jira   = state.get("current_jira") or {}
+current_jira_key = current_jira.get("key")
 standup_status  = state.get("status", "unknown")
 spoken_text     = state.get("spoken_text", "")
 project_key     = state.get("project_key", "")
 
-log.info("RENDER | project=%s issues=%d bot_state=%s current=%s",
-         project_key, len(issues), standup_status, current_issue_key or "—")
+log.info("RENDER | project=%s jiras=%d bot_state=%s current=%s",
+         project_key, len(jiras), standup_status, current_jira_key or "—")
 
 m1, m2, m3 = st.columns(3)
 m1.metric("Project",   project_key or "-")
-m2.metric("Issues",    len(issues))
+m2.metric("Total Jira Count",    len(jiras))
 m3.metric("Bot State", standup_status)   # renamed from "State"
 
-render_board(issues, current_issue_key)
-render_bottom_current_issue(current_issue, spoken_text, standup_status)
+render_board(jiras, current_jira_key)
+render_bottom_current_jira(current_jira, spoken_text, standup_status)
 
 time.sleep(REFRESH_SECONDS)
 st.rerun()

@@ -4,7 +4,7 @@
 This dashboard is meant to be shown by the Recall bot as webpage output.
 
 It polls the Azure Function App state endpoint and shows:
-- current issue
+- current jira
 - current assignee
 - bot status
 - spoken text
